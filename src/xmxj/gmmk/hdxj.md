@@ -737,10 +737,168 @@ public class OkHttpInterfaceBeanFactory implements FactoryBean {
 
 ## 指定负载均衡
 
+### 负载均衡
+
 ::: tip
 这里通过自定义负载均衡策略来达到指定调用某服务
 :::
+主要代码在 xyz.chener.zp.common.config.feign.loadbalance 包下 <br>
+负载均衡策略参考 org.springframework.cloud.loadbalancer.core.RoundRobinLoadBalancer ，并在其基础上改动。
+```java
+public class NormalLoadBalance implements ReactorServiceInstanceLoadBalancer {
 
+    private static final Logger log = LoggerFactory.getLogger(NormalLoadBalance.class);
+
+    final AtomicInteger position;
+
+    final String serviceId;
+
+    ObjectProvider<ServiceInstanceListSupplier> serviceInstanceListSupplierProvider;
+
+
+    public NormalLoadBalance(ObjectProvider<ServiceInstanceListSupplier> serviceInstanceListSupplierProvider,
+                                  String serviceId) {
+        this(serviceInstanceListSupplierProvider, serviceId, new Random().nextInt(1000));
+    }
+
+
+    public NormalLoadBalance(ObjectProvider<ServiceInstanceListSupplier> serviceInstanceListSupplierProvider,
+                                  String serviceId, int seedPosition) {
+        this.serviceId = serviceId;
+        this.serviceInstanceListSupplierProvider = serviceInstanceListSupplierProvider;
+        this.position = new AtomicInteger(seedPosition);
+    }
+
+    @SuppressWarnings("rawtypes")
+    @Override
+    public Mono<Response<ServiceInstance>> choose(Request request) {
+        ServiceInstanceListSupplier supplier = serviceInstanceListSupplierProvider
+                .getIfAvailable(NoopServiceInstanceListSupplier::new);
+        // 这里通过ThreadLocal获取指定的服务地址
+        ServerInstance nextInstance = LoadbalancerContextHolder.getNextInstance();
+        return supplier.get(request).next()
+                .map(serviceInstances -> processInstanceResponse(supplier, serviceInstances,nextInstance));
+    };
+
+    private Response<ServiceInstance> processInstanceResponse(ServiceInstanceListSupplier supplier,
+                                                              List<ServiceInstance> serviceInstances,
+                                                              ServerInstance nextInstance) {
+        Response<ServiceInstance> serviceInstanceResponse = getInstanceResponse(serviceInstances,nextInstance);
+        if (supplier instanceof SelectedInstanceCallback && serviceInstanceResponse.hasServer()) {
+            ((SelectedInstanceCallback) supplier).selectedServiceInstance(serviceInstanceResponse.getServer());
+        }
+        return serviceInstanceResponse;
+    }
+
+    private Response<ServiceInstance> getInstanceResponse(List<ServiceInstance> instances,ServerInstance nextInstance) {
+        if (instances.isEmpty() && nextInstance == null) {
+            if (log.isWarnEnabled()) {
+                log.warn("No servers available for service: " + serviceId);
+            }
+            return new EmptyResponse();
+        }
+
+        if (nextInstance != null){
+            for (ServiceInstance instance : instances) {
+                // 如果能找到指定的实例，则返回该实例
+                if (instance.getHost().equals(nextInstance.host()) && instance.getPort() == nextInstance.port()){
+                    return new DefaultResponse(instance);
+                }
+            }
+            log.warn("自定义IP负载均衡:未找到指定的实例[{}:{}],将返回空实例", nextInstance.host(), nextInstance.port());
+            return new EmptyResponse();
+        }
+
+        if (instances.size() == 1) {
+            return new DefaultResponse(instances.get(0));
+        }
+
+        int pos = this.position.incrementAndGet() & Integer.MAX_VALUE;
+
+        ServiceInstance instance = instances.get(pos % instances.size());
+
+        return new DefaultResponse(instance);
+    }
+}
+```
+
+> 通过 LoadbalancerContextHolder 可轻松控制OpenFeign下一次调用的实例 <br>
+> 具体的实例地址如何取到，在后续的 [Utils说明](/xmxj/gmmk/hdxj.html#各utils类说明) 中会有说明。
+
+::: warning
+如何启用？
+:::
+启用需在启动类上标注 LoadBalancerClients 注解，并指定哪个服务启用，如下：
+```java
+// 例如
+@LoadBalancerClients({
+        @LoadBalancerClient(name = "zp-user-module",configuration = NormalLoadBalanceAutoConfiguration.class)
+})
+```
+
+此服务名对应OpenFeign接口中的服务名，如下：
+```java
+@FeignClient(name = "zp-user-module",fallback = UserModuleServiceFallback.class)
+public interface UserModuleService {
+    @RequestMapping(value = "/api/web/getWsOnlineUsersForMs",method = RequestMethod.GET)
+    List<String> getWsOnlineUsersName();
+}
+```
+
+### OpenFeign扩展
+
+#### OpenFeign 自定义请求头
+```java
+public class FeignRequestInterceptor  implements RequestInterceptor {
+    private final CommonConfig commonConfig;
+
+    public FeignRequestInterceptor(CommonConfig commonConfig) {
+        this.commonConfig = commonConfig;
+    }
+
+    @Override
+    public void apply(RequestTemplate template) {
+        // 这里添加自定义请求头
+        // 这里添加了一个自定义请求头，用于标识该请求是通过OpenFeign发起的，如果权限中配置了允许
+        // 部分权限调用，也会根据该请求头来判断是否允许调用
+        template.header(CommonVar.OPEN_FEIGN_HEADER, commonConfig.getSecurity().getFeignCallSlat());
+    }
+}
+```
+#### OpenFeign 返回自动值处理
+```java
+@Slf4j
+public class FeignResultDecoder implements Decoder {
+    @Override
+    public Object decode(Response response, Type type) throws IOException, DecodeException, FeignException {
+        // 这里的逻辑为:
+        // 如果是需要R对象，则直接返回R对象
+        // 如果是需要其它对象，则返回R对象中的obj字段
+        // 这里使用了 TypeFactory 来使用字符串拼接泛型供Jackson解析
+        try {
+            String body = new String(response.body().asInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            ObjectMapper om = new ObjectMapper();
+            om.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+            R<?> obj = om.readValue(body, TypeFactory.defaultInstance()
+                    .constructFromCanonical(String.format("%s<%s>", R.class.getName(), type.getTypeName())));
+            if (obj.getCode()!=R.HttpCode.HTTP_OK.get())
+            {
+                log.warn("openfeign call error : "+obj.getMessage());
+            }
+            return obj.getObj();
+        }catch (Exception exception)
+        {
+            exception.printStackTrace();
+            log.error(exception.getMessage());
+            throw new RuntimeException(R.ErrorMessage.FEIGN_DECODER_ERROR.get());
+        }
+    }
+}
+```
+
+::: tip
+注入直接新增 Decoder 和 FeignRequestInterceptor 的Bean即可。
+:::
 
 
 ## 动态验参
