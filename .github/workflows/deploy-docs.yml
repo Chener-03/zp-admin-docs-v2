@@ -2,10 +2,7 @@
 name: 部署文档
 
 on:
-  push:
-    branches:
-      # 确保这是你正在使用的分支名称
-      - main
+  workflow_dispatch:
 
 jobs:
   deploy-gh-pages:
@@ -35,6 +32,14 @@ jobs:
         run: |-
           yarn run docs:build
           > src/.vuepress/dist/.nojekyll
+
+      - name: Upload latest artifact
+        uses: actions/upload-artifact@v3.1.0
+        with:
+          name: dist
+          path: src/.vuepress/dist/**
+          if-no-files-found: error
+
 
       - name: 部署文档
         uses: JamesIves/github-pages-deploy-action@v4
