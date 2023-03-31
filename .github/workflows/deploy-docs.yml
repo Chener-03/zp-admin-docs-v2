@@ -36,7 +36,7 @@ jobs:
       - name: Upload latest artifact
         uses: actions/upload-artifact@v3.1.0
         with:
-          name: genshin-music-data-jar
+          name: dist
           path: src/.vuepress/dist/**
           if-no-files-found: error
 
