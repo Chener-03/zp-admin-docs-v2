@@ -27,7 +27,6 @@ export const zhSidebar = sidebar({
       prefix: "gmmk/",
       link: "gmmk/",
       children: ["hdxj","qdxj"]
-    },
-    "slides",
+    }
   ],
 });
