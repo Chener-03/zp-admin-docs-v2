@@ -2,18 +2,18 @@
 title: 后端详解
 icon: page
 order: 1
-date: 2020-01-01
+date: 2023-03-31
 category:
 - 使用指南
 tag:
-- 页面配置
-- 使用指南
+- 源码解读
+- 教程
 
 ---
 
 
 > 本文档为后端文档，主要介绍后端的实现和使用方法。
-> 将大致按照项目目录进行介绍。
+
 
 
 ## 鉴权
@@ -902,20 +902,616 @@ public class FeignResultDecoder implements Decoder {
 
 
 ## 动态验参
+> 这里实现了通过注解来校验部分参数的MD5值，防止参数被篡改。 <br>
+> 参数其它校验引入 validation 即可。
+
+主要流程为:
+* 通过注解启用，并标明MD5值在哪个字段
+* 判断多种参数类型，获取参数值
+* 计算并检验
+
+```java
+public class DynamicVerAop {
+    
+    // ...... 省略部分代码
+    
+    @Pointcut("@annotation(xyz.chener.zp.common.config.dynamicVerification.annotation.Ds)" +
+            " && (@annotation(org.springframework.web.bind.annotation.GetMapping) " +
+            "|| @annotation(org.springframework.web.bind.annotation.PostMapping) " +
+            "|| @annotation(org.springframework.web.bind.annotation.PutMapping) " +
+            "|| @annotation(org.springframework.web.bind.annotation.DeleteMapping) " +
+            "|| @annotation(org.springframework.web.bind.annotation.RequestMapping))")
+    public void dsPointcut() { }
+
+
+    // 主要逻辑 
+    @Around("dsPointcut()")
+    public Object dsAround(ProceedingJoinPoint pjp) throws Throwable {
+        try {
+            Signature signature = pjp.getSignature();
+            if (signature instanceof MethodSignature methodSignature)
+            {
+                Method targetMethod = methodSignature.getMethod();
+                Ds dsAnn = targetMethod.getAnnotation(Ds.class);
+                String dsValueFieldName = dsAnn.value();
+                Class<?> dsClazz = dsAnn.verImplClass();
+                // 获取传来的MD5在哪个字段
+                if (StringUtils.hasText(dsValueFieldName))
+                {
+                    // 获取参数元数据 (就是参数名 参数值 注解等)
+                    Set<DsFieldsMetadata> metadataSet = getMethodDsFieldsMetadata(targetMethod);
+                    // 获取校验实现类
+                    DynamicVerRuleInterface dsInstance = getDsInstance(dsClazz);
+                    ArrayList<String> args = new ArrayList<>();
+                    // 遍历参数元数据，获取参数值存入args
+                    // 不同类型(例如Map Collections等) 将有不同的处理方式
+                    // 省略部分代码 .......
+    
+                    String[] argsArr = args.toArray(new String[0]);
+                    // 调用校验实现类的verify方法，校验MD5
+                    AssertUrils.state(ObjectUtils.nullSafeEquals(dsInstance.verify((Object[]) argsArr),dsValue),new RuntimeException("MD5 verification failed"));
+                }
+            }
+        }catch (Exception e){
+            log.error(e.getMessage());
+            throw new DynamicVerificationError();
+        }
+        return pjp.proceed();
+    }
+
+    private void processObjectType(Object obj,DsFieldsMetadata metadata,List<String> resList){
+        processObjectType(obj,metadata,resList,false);
+    }
+    private void processObjectType(Object obj,DsFieldsMetadata metadata,List<String> resList,Boolean isObjectRecurrence)
+    {
+        // 处理对象 将对象中的字段值拼接成字符串，Map和Obejct以及基本数据类型 有不同的处理方式
+        // 省略部分代码 .......
+    }
+
+    private Object getFieldObject(Field field,Object obj){
+        // 反射获取对象字段
+    }
+
+    private Object getObjectWithMultistageKey(Object map,String key){
+        // 通过多级Key获取对象 eg: getObjectWithMultistageKey(map,"a.b.c")
+    }
+
+    private Object getObjectWithKey(Object map,String key){
+        // 通过Key获取对象
+    }
+
+    private String processBaseType(Object obj){
+        // 基本数据类型转为String
+    }
+    
+
+    private DynamicVerRuleInterface getDsInstance(Class<?> clazz) throws NoSuchMethodException, InvocationTargetException, InstantiationException, IllegalAccessException {
+        // 获取校验实现类
+    }
+
+
+    private Set<DsFieldsMetadata> getMethodDsFieldsMetadata(Method method) {
+        // 获取参数元数据
+    }
+
+    private Annotation findAnnotation(Annotation[] annotations, Class<?> annotationClass) {
+        for (Annotation a : annotations) {
+            if (a.annotationType().getName().equals(annotationClass.getName())) {
+                return a;
+            }
+        }
+        return null;
+    }
+
+    private String[] getMethodParamName(Method method)
+    {
+        // 获取方法参数名称 这里借用了Spring的 DefaultParameterNameDiscoverer 类
+        // 如果构建时有参数 -parameters 则可以直接获取到参数名称
+        // 否则通过 asm 读取 class 文件获取参数名称
+    }
+
+    // 参数元数据实体类
+    public static class DsFieldsMetadata implements Comparable<DsFieldsMetadata> {
+        public Class<?> fieldClass;
+
+        public Annotation fieldAnnotation;
+
+        public String fieldName;
+
+        public int order;
+
+        public String[] dsObjectFieldNames;
+
+        public int argIndex;
+
+        @Override
+        public boolean equals(Object obj) {
+            if (obj == null) return false;
+            if (obj instanceof DsFieldsMetadata dsFieldsMetadata) {
+                return this.fieldName.equals(dsFieldsMetadata.fieldName);
+            }
+            return false;
+        }
+
+        @Override
+        public int compareTo(DsFieldsMetadata o) {
+            return this.order - o.order == 0 ? 1 : this.order - o.order;
+        }
+    }
+
+}
+
+```
 
 ## 接口防抖
+> 这里实现了通过AOP来实现防抖，防止接口被同一参数频繁调用。 <br>
+
+实现代码位于 xyz.chener.zp.common.config.antiShaking.aop.AntiShakingAop 类中。<br>
+流程简单，具体流程可查阅代码。默认实现为Redis实现，可自行实现 AntiShakingInterface 接口，替换为Guava等。
+
+::: warning
+主要防止重复提交，这里不可当做限流使用。
+:::
 
 ## 接口限流
+::: tip
+这里借助Sentinel实现接口限流，Sentinel资源和URL为一一对应关系，无法做到类似通配符匹配限流方法。<br>
+这里扩展了一点功能，达到一个限流方式匹配多个URL的效果。<br>
+:::
+
+这里构造了 xyz.chener.zp.sentinelAdapter.currentlimit.CurrentLimitManager 类，用于管理限流资源。<br>
+主要思路为: 接管Sentinel的FlowRuleManager，在 SphU.entry 获取资源的时候，返回资源名+UID的形式，<br>
+这样既可以使同一个限流类型通配不同的URL或者方法，也可以完全不修改Sentinel原有的使用方式。<br>
+```java
+public class CurrentLimitManager {
+    //  key:resource+uuid
+    public static final ConcurrentHashMap<String, CurrentLimitRuleInfo> cache = new ConcurrentHashMap<>();
+    //  key:resource
+    public static final ConcurrentHashMap<String, FlowRule> rules = new ConcurrentHashMap<>();
+    
+    // 这里加载一个规则 参数:规则名和规则类
+    public static void addRules(String resource,FlowRule rule){
+        rules.put(resource,rule);
+    }
+    // 移除
+    public static void removeRules(String resource){
+        rules.remove(resource);
+        ArrayList<String> removeKeys = new ArrayList<>();
+        cache.forEach((key, value) -> {
+            if (value.getResource().equals(resource)) {
+                removeKeys.add(key);
+            }
+        });
+        removeKeys.forEach(key -> {
+            removeRule(key);
+            cache.remove(key);
+        });
+    }
+    
+    // 验证缓存的规则是否有效 如果无效则移除
+    public static void verifyAllRules(){
+        ArrayList<String> removeKeys = new ArrayList<>();
+        cache.forEach((key, value) -> {
+            if (!rules.containsKey(value.getResource())) {
+                removeKeys.add(key);
+            }
+        });
+        removeKeys.forEach(key -> {
+            removeRule(key);
+            cache.remove(key);
+        });
+    }
+    
+    // 获取 SphU.entry 需要的资源名  传入规则名和UID 这个uid可以是url 也可以是方法全路径
+    public static String getRulesName(String resource,String uuid){
+        Objects.requireNonNull(resource);
+        Objects.requireNonNull(uuid);
+        if (cache.containsKey(resource+uuid)) {
+            return cache.get(resource+uuid).getKey();
+        }
+        if (rules.containsKey(resource)) {
+            FlowRule flowRule = rules.get(resource);
+            flowRule.setResource(resource + uuid);
+            loadRule(flowRule);
+            CurrentLimitRuleInfo currentLimitRuleInfo = new CurrentLimitRuleInfo();
+            currentLimitRuleInfo.setKey(resource + uuid);
+            currentLimitRuleInfo.setResource(resource);
+            cache.put(resource + uuid, currentLimitRuleInfo);
+            return resource + uuid;
+        }
+        return null;
+    }
+
+    // 加载Sentinel限流规则
+    private static synchronized void loadRule(FlowRule flowRule){
+        ArrayList<FlowRule> flowRules = new ArrayList<>(FlowRuleManager.getRules());
+        flowRules.add(flowRule);
+        FlowRuleManager.loadRules(flowRules);
+    }
+    
+    // 移除Sentinel限流规则
+    private static synchronized void removeRule(String resource){
+        ArrayList<FlowRule> flowRules = new ArrayList<>(FlowRuleManager.getRules());
+        flowRules.removeIf(flowRule -> flowRule.getResource().equals(resource));
+        FlowRuleManager.loadRules(flowRules);
+    }
+
+}
+```
+
+<br>
+通过AOP来对接口或方法进行限流，实现类 xyz.chener.zp.sentinelAdapter.aop.CurrentLimitAop。<br>
+
+限流规则配置可以通过代码配置也可以通过Nacos动态配置 <br>
+下面是监听Nacos配置变化的方法，监听了限流和熔断降级配置。
+```java
+// xyz.chener.zp.sentinelAdapter.nacosclient.SentinelConfigChangeListener
+@EnableConfigurationProperties(SentinelCustomConfig.class)
+public class SentinelConfigChangeListener implements ApplicationListener<ApplicationStartedEvent> {
+
+    private static Logger logger = org.slf4j.LoggerFactory.getLogger(SentinelConfigChangeListener.class);
+
+    private final SentinelCustomConfig sentinelCustomConfig;
+
+    public static final List<Consumer<List<FlowRule>>> flowChangeListeners = new CopyOnWriteArrayList<>();
+    public static final List<Consumer<List<DegradeRule>>> degradeChangeListeners = new CopyOnWriteArrayList<>();
+
+    private final ExecutorService pool = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(1), new NamedThreadFactory("sentinel-nacos-ds-update", true),
+            new ThreadPoolExecutor.DiscardOldestPolicy());
+
+    public SentinelConfigChangeListener(SentinelCustomConfig sentinelCustomConfig) {
+        this.sentinelCustomConfig = sentinelCustomConfig;
+    }
+
+    @Override
+    public void onApplicationEvent(ApplicationStartedEvent event) {
+        // 这里添加了几个监听器，具体监听什么文件配置与yml中，配置文件类型参考Sentinel原来的类型
+        if (sentinelCustomConfig.getEnableAutoLoad()){
+            try {
+                Properties nacosProperties = sentinelCustomConfig.covertToProperties();
+                ConfigService configService = NacosFactory.createConfigService(nacosProperties);
+                sentinelCustomConfig.getNacos().values().forEach(e->{
+                    try {
+                        if (e.getRuleType().equals("flow")) {
+                            String config = configService.getConfig(e.getDataId(), sentinelCustomConfig.getGroupId(), 5000);
+                            processFlowJson(config);
+                            configService.addListener(e.getDataId(), sentinelCustomConfig.getGroupId(), new Listener() {
+                                @Override
+                                public Executor getExecutor() {
+                                    return pool;
+                                }
+
+                                @Override
+                                public void receiveConfigInfo(String configInfo) {
+                                    processFlowJson(configInfo);
+                                }
+                            });
+                        }
+                        if (e.getRuleType().equals("degrade")) {
+                            String config = configService.getConfig(e.getDataId(), sentinelCustomConfig.getGroupId(), 5000);
+                            processDegradeJson(config);
+                            configService.addListener(e.getDataId(), sentinelCustomConfig.getGroupId(), new Listener() {
+                                @Override
+                                public Executor getExecutor() {
+                                    return pool;
+                                }
+
+                                @Override
+                                public void receiveConfigInfo(String configInfo) {
+                                    processDegradeJson(configInfo);
+                                }
+                            });
+                        }
+                    }catch (Exception exi){
+                        throw new RuntimeException(exi);
+                    }
+                });
+            }catch (Exception exception){
+                logger.error("sentinel nacos config listener init error",exception);
+            }
+        }
+
+    }
+
+    private void processFlowJson(String configInfo) {
+        // 处理nacos发来的限流json配置
+    }
+
+    private void processDegradeJson(String json){
+        // 处理nacos发来的熔断降级json配置
+    }
+
+    private FlowRule parseFlowRule(Map map){
+        // 通过Map获取限流规则
+    }
+
+    private DegradeRule parseDegradeRule(Map map){
+        // 通过Map获取降级规则
+    }
+
+}
+
+
+```
+
+::: tip
+暂未引入分布式限流,因为限流目的主要为了保护服务，并不是为了限制接口调用量，所以分布式限流的意义不大。<br>
+如需实现，参考[Sentinel官方文档中的集群流量控制](https://sentinelguard.io/zh-cn/docs/cluster-flow-control.html)。
+:::
 
 ## 熔断降级
 
+这里AOP的实现方式参考上方 接口限流 的，基本一致。<br>
+对于OpenFeign的支持实现，参考了 com.alibaba.cloud.sentinel.feign 包中的流程，重写了 SentinelInvocationHandler 。<br>
+
+```java
+@Override
+public Object invoke(final Object proxy, final Method method, final Object[] args)
+        throws Throwable {
+    if ("equals".equals(method.getName())) {
+        try {
+            Object otherHandler = args.length > 0 && args[0] != null
+                    ? Proxy.getInvocationHandler(args[0])
+                    : null;
+            return equals(otherHandler);
+        }
+        catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+    else if ("hashCode".equals(method.getName())) {
+        return hashCode();
+    }
+    else if ("toString".equals(method.getName())) {
+        return toString();
+    }
+
+    Object result;
+    MethodHandler methodHandler = this.dispatch.get(method);
+    // only handle by HardCodedTarget
+    if (target instanceof Target.HardCodedTarget hardCodedTarget) {
+        MethodMetadata methodMetadata = SentinelContractHolder.METADATA_MAP
+                .get(hardCodedTarget.type().getName()
+                        + Feign.configKey(hardCodedTarget.type(), method));
+        // resource default is HttpMethod:protocol://url
+        if (methodMetadata == null) {
+            result = methodHandler.invoke(args);
+        }
+        else {
+            // 这里重写了获取资源名的方法，达到上述功能
+            String resourceName = methodMetadata.template().method().toUpperCase()
+                    + ":" + hardCodedTarget.url() + methodMetadata.template().path();
+            Entry entry = null;
+            String prefix = "";
+            try {
+                CircuitBreakResourceFeign classResName = methodMetadata.targetType().getAnnotation(CircuitBreakResourceFeign.class);
+                CircuitBreakResourceFeign methodResName = methodMetadata.method().getAnnotation(CircuitBreakResourceFeign.class);
+                if (classResName != null && StringUtils.hasText(classResName.value())) {
+                    prefix = classResName.value();
+                }
+                if (methodResName != null && StringUtils.hasText(methodResName.value())) {
+                    prefix = methodResName.value();
+                }
+            }catch (Exception getNameException){
+                System.err.println("自定义熔断资源名获取异常");
+                throw getNameException;
+            }
+            if (StringUtils.hasText(prefix)) {
+                resourceName = CircuitBreakRuleManager.getRulesName(prefix, resourceName);
+            }
+
+            try {
+                ContextUtil.enter(resourceName);
+                entry = SphU.entry(resourceName, EntryType.OUT, 1, args);
+                result = methodHandler.invoke(args);
+            }
+            catch (Throwable ex) {
+                // fallback handle
+                if (!BlockException.isBlockException(ex)) {
+                    Tracer.traceEntry(ex, entry);
+                }
+                if (fallbackFactory != null) {
+                    try {
+                        Object fallbackResult = fallbackMethodMap.get(method)
+                                .invoke(fallbackFactory.create(ex), args);
+                        return fallbackResult;
+                    }
+                    catch (IllegalAccessException e) {
+                        // shouldn't happen as method is public due to being an
+                        // interface
+                        throw new AssertionError(e);
+                    }
+                    catch (InvocationTargetException e) {
+                        throw new AssertionError(e.getCause());
+                    }
+                }
+                else {
+                    // throw exception if fallbackFactory is null
+                    throw ex;
+                }
+            }
+            finally {
+                if (entry != null) {
+                    entry.exit(1, args);
+                }
+                ContextUtil.exit();
+            }
+        }
+    }
+    else {
+        // other target type using default strategy
+        result = methodHandler.invoke(args);
+    }
+
+    return result;
+}
+```
+
+::: tip
+这里有个BUG，需要将配置文件 spring.cloud.openfeign.lazy-attributes-resolution 设置为true ，否则会报错。Spring Cloud Alibaba版本为2022.0.0.0-RC1。
+后续官方会解决。[ISSUES](https://github.com/alibaba/spring-cloud-alibaba/issues/3024) <br>
+:::
+
 ## 日志记录
 
-## 系统信息
+这里通过对Logback的扩展，实现了对系统的日志记录入库。<br>
+代码位于logger模块中，主要实现了自定义 Appender ，类 xyz.chener.zp.logger.logback.LogPushEsAppender 。<br>
+按照ELK栈应该使用Logstash对日志进行处理推送，但由于资源有限，这里直接推送到了Elasticsearch中。<br>
 
-## WebSocket
+大致逻辑:
+* 在logback配置文件中拼接出json
+* 在Appender中将json转换为实体类
+* 交给推送线程处理
+
+```xml
+    <property name="JSON_LOG_PATTERN" value="
+    {
+        &quot;time&quot;:&quot;%d{yyyy-MM-dd HH:mm:ss.SSS}&quot;,
+        &quot;tid&quot;:&quot;%tid&quot;,
+        &quot;sId&quot;:&quot;%sId&quot;,
+        &quot;iId&quot;:&quot;%iId&quot;,
+        &quot;level&quot;:&quot;%level&quot;,
+        &quot;thread&quot;:&quot;%t&quot;,
+        &quot;logger&quot;:&quot;%logger&quot;,
+        &quot;message&quot;:&quot;%msg&quot;
+    }"/>
+```
+
+推送到Es中可搭配Kibana进行可视化展示，这里的日志推荐永久保存，Skywalking中链路日志一般只保留一段时间。<br>
+
+## 系统信息
+通过对Spring Boot Actuator，实现了对系统的信息收集。<br>
+
+通过[Nacos API](https://nacos.io/zh-cn/docs/open-api.html)获取服务列表: 
+```java
+@HttpExchange(NacosRequest.NACOS_HOST)
+public interface NacosRequest {
+    String NACOS_HOST = " ";
+    /**
+     * 获取服务名列表
+     * @param pageNo
+     * @param pageSize
+     * @param groupName
+     * @param namespaceId
+     * @return
+     */
+    @GetExchange("/nacos/v1/ns/service/list")
+    ServerNames getServiceNameList(@RequestHeader("username") String username
+            , @RequestHeader("password") String password
+            ,@RequestParam("pageNo") int pageNo
+            , @RequestParam("pageSize") int pageSize
+            , @RequestParam("groupName") String groupName
+            , @RequestParam("namespaceId") String namespaceId);
+    /**
+     * 按照服务名获取实例列表
+     * @param serviceName
+     * @param groupName
+     * @param namespaceId
+     * @return
+     */
+    @GetExchange("/nacos/v1/ns/instance/list")
+    NacosServerInstance getInstanceList(@RequestHeader("username") String username
+            , @RequestHeader("password") String password
+            ,@RequestParam("serviceName") String serviceName
+            , @RequestParam("groupName") String groupName
+            , @RequestParam("namespaceId") String namespaceId);
+    /**
+     * 获取实例信息
+     * @param serviceName
+     * @param groupName
+     * @param namespaceId
+     * @param ip
+     * @param port
+     * @return
+     */
+    @GetExchange("/nacos/v1/ns/instance")
+    ServerInstanceInfo getInstance(@RequestHeader("username") String username
+            , @RequestHeader("password") String password
+            , @RequestParam("serviceName") String serviceName
+            , @RequestParam("groupName") String groupName
+            , @RequestParam("namespaceId") String namespaceId
+            , @RequestParam("ip") String ip
+            , @RequestParam("port") int port);
+
+
+}
+```
+
+Actuator信息收集 ([全部端点](https://docs.spring.io/spring-boot/docs/3.0.5/actuator-api/htmlsingle/)) : 
+```java
+@HttpExchange("http://none")
+public interface ActuatorRequest {
+    String prefix = "/actuator";
+
+    @GetExchange(prefix+"/health")
+    String getHealthBaseInfo(@RequestHeader(CommonVar.OPEN_FEIGN_HEADER) String headerKey);
+    
+    @GetExchange(prefix+"/metrics/{path}")
+    String getMetrics(@RequestHeader(CommonVar.OPEN_FEIGN_HEADER) String headerKey
+            , @PathVariable("path") String path);
+    
+    @GetExchange(prefix+"/sentinelCustom/{resourceName}")
+    Map getSentinelCustom(@RequestHeader(CommonVar.OPEN_FEIGN_HEADER) String headerKey
+            , @PathVariable("resourceName") String resourceName);
+}
+```
+
 
 ## 各Utils类说明
 
+### common
+#### AssertUrils
+断言类，用于判断参数1是否成立，不成立则抛出异常。<br>
+xyz.chener.zp.common.utils.AssertUrils#state(boolean, java.lang.Class<?>)<br>
+xyz.chener.zp.common.utils.AssertUrils#state(boolean, java.lang.RuntimeException)
 
+#### GZipUtils
+json压缩为byte[] <br>
+xyz.chener.zp.common.utils.GZipUtils#compressJson
+byte[]解压为json <br>
+xyz.chener.zp.common.utils.GZipUtils#uncompressJson
+
+#### IpUtils
+获取真实IP <br>
+xyz.chener.zp.common.utils.IpUtils#getRealIp
+
+#### Jwt
+jwt工具类 <br>
+xyz.chener.zp.common.utils.Jwt#encode(xyz.chener.zp.common.entity.LoginUserDetails)<br>
+xyz.chener.zp.common.utils.Jwt#decode
+
+#### LoggerUtils
+日志工具类，打印异常堆栈及信息 <br>
+xyz.chener.zp.common.utils.LoggerUtils#logErrorStackTrace
+
+#### MapBuilder
+Map构造器，用于构造Map <br>
+
+#### Md5Utiles
+获取数据的MD5值 <br>
+xyz.chener.zp.common.utils.Md5Utiles#getDataMd5
+
+#### NacosUtils
+获取Nacos中的服务实例 <br>
+xyz.chener.zp.common.utils.NacosUtils#getServerInstance
+
+#### ObjectUtils
+比较对象中部分字段是否相等<br>
+xyz.chener.zp.common.utils.ObjectUtils#objectFieldsEquals <br>
+获取方法引用的方法名 <br>
+xyz.chener.zp.common.utils.ObjectUtils#getSFunctionName <br>
+复制对象中的字段 <br>
+xyz.chener.zp.common.utils.ObjectUtils#copyFields <br>
+判断对象是否为基本类型 <br>
+xyz.chener.zp.common.utils.ObjectUtils#isBasicType(java.lang.Object) <br>
+
+#### RequestUtils
+请求工具类，获取请求的实体，请求头等信息 <br>
+
+#### SecurityUtils
+权限工具类，判断是否有某权限 <br>
+
+#### TransactionUtils
+事务工具类，用于生成 TransactionDefinition  <br>
 

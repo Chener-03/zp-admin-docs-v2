@@ -2,22 +2,22 @@ import { navbar } from "vuepress-theme-hope";
 
 export const zhNavbar = navbar([
   "/",
-  { text: "项目详解", icon: "discover", link: "/xmxj/gl/" },
-  { text: "项目实战", icon: "discover", link: "/demo/" },
-  { text: "更新历史", icon: "discover", link: "/demo/" },
-  { text: "仓库地址", icon: "discover", link: "/demo/" },
+  { text: "项目详解", icon: "alias", link: "/xmxj/gl/" },
+  { text: "项目实战", icon: "advance", link: "/xmsz/" },
+  { text: "更新历史", icon: "result", link: "/xmxj/gl/gxls" },
+  { text: "仓库地址", icon: "branch", link: "/xmxj/gl/js.html#项目地址" },
   {
     text: "在线体验",
     icon: "creative",
     children: [
       {
         text: "Web版",
-        icon: "creative",
+        icon: "computer",
         link: "http://zpdemo.chener.xyz/",
       },
       {
         text: "安卓版",
-        icon: "config",
+        icon: "android",
         link: "http://zpdemo.chener.xyz/",
       },
       {
